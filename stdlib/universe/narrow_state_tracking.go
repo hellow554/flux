@@ -25,7 +25,7 @@ func NewNarrowStateTrackingTransformation(ctx context.Context, spec *StateTracki
 		durCol:   spec.DurationColumn,
 		unit:     int64(spec.DurationUnit.Duration()),
 	}
-	nt, d, err := execute.NewNarrowStateTransformation(id, t, mem)
+	nt, d, err := execute.NewNarrowStateTransformation[any](id, t, mem)
 	if err != nil {
 		return nil, nil, err
 	}

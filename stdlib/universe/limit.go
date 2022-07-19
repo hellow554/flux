@@ -261,21 +261,18 @@ func (*limitTransformationAdapter) Close() error {
 
 func (t *limitTransformationAdapter) Process(
 	chunk table.Chunk,
-	state interface{},
+	state *limitState,
 	dataset *execute.TransportDataset,
 	_ arrowmem.Allocator,
-) (interface{}, bool, error) {
+) (*limitState, bool, error) {
 
-	var state_ *limitState
 	// `.Process` is reentrant, so to speak. The first invocation will not
 	// include a value for `state`. Initialization happens here then is passed
 	// in/out for the subsequent calls.
 	if state == nil {
-		state_ = &limitState{n: t.limitTransformation.n, offset: t.limitTransformation.offset}
-	} else {
-		state_ = state.(*limitState)
+		state = &limitState{n: t.limitTransformation.n, offset: t.limitTransformation.offset}
 	}
-	return t.processChunk(chunk, state_, dataset)
+	return t.processChunk(chunk, state, dataset)
 }
 
 func (t *limitTransformationAdapter) processChunk(
@@ -359,5 +356,5 @@ func NewNarrowLimitTransformation(
 			offset: int(spec.Offset),
 		},
 	}
-	return execute.NewNarrowStateTransformation(id, t, mem)
+	return execute.NewNarrowStateTransformation[*limitState](id, t, mem)
 }
