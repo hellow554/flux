@@ -411,6 +411,105 @@ func (e *conditionalEvaluator) Eval(ctx context.Context, scope Scope) (values.Va
 	}
 }
 
+type conditionalVectorEvaluator struct {
+	test       Evaluator
+	consequent Evaluator
+	alternate  Evaluator
+}
+
+func (e *conditionalVectorEvaluator) Type() semantic.MonoType {
+	return e.alternate.Type()
+}
+
+func (e *conditionalVectorEvaluator) Eval(ctx context.Context, scope Scope) (values.Value, error) {
+	t, err := eval(ctx, e.test, scope)
+	if err != nil {
+		return nil, err
+	}
+	defer t.Release()
+
+	// FIXME(onelson): is there a way to compare the MT more directly?
+	//  Really want to test for:
+	//  - is it non null?
+	//  - is it v[bool]?
+
+	typ := t.Type()
+
+	// Will err if typ is not Vector or Array, but that's fine.
+	// We're testing first to make sure this is a Vector.
+	etyp, _ := typ.ElemType()
+
+	if !t.IsNull() && !(typ.Nature() == semantic.Vector && etyp.Nature() == semantic.Bool) {
+		return nil, errors.Newf(codes.Invalid, "cannot use test of type %s in vectorized conditional expression; expected vector of boolean", typ)
+	}
+
+	// FIXME: vectorized impl here
+
+	mem := memory.GetAllocator(ctx)
+
+	tv := t.Vector().Arr().(*array.Boolean)
+	n := tv.Len()
+
+	// Scan to see if we have all one outcome for the test.
+	initialOutcome := tv.IsValid(0) && tv.Value(0)
+	varied := false
+	for i := 0; i < n; i++ {
+		if tv.IsValid(i) {
+			if initialOutcome != tv.Value(i) {
+				varied = true
+				break
+			}
+		}
+	}
+
+	if !varied {
+		if initialOutcome {
+			return eval(ctx, e.consequent, scope)
+		} else {
+			return eval(ctx, e.alternate, scope)
+		}
+	}
+
+	b := array.NewIntBuilder(mem) // FIXME: need to match the type of the alternate
+	b.Resize(n)
+
+	a, err := eval(ctx, e.alternate, scope)
+	if err != nil {
+		return nil, err
+	}
+	c, err := eval(ctx, e.consequent, scope)
+	if err != nil {
+		return nil, err
+	}
+	// FIXME: take vec repeat into account!
+	cv := c.Vector().Arr().(*array.Int) // FIXME: need elem type
+	av := a.Vector().Arr().(*array.Int) // FIXME: need elem type
+
+	if cv.Len() != n || av.Len() != n {
+		return nil, errors.Newf(codes.Invalid, "vectors must be equal length") // FIXME: make message consistent with prior art
+	}
+
+	for i := 0; i < n; i++ {
+		if tv.IsValid(i) && cv.IsValid(i) && av.IsValid(i) {
+			// FIXME: is this?? Not sure when we need to append null.
+			//  The standard conditional treats a null test as a false...
+			if cv.IsNull(i) || av.IsNull(i) {
+				b.AppendNull()
+			} else if tv.IsNull(i) || !tv.Value(i) {
+				b.Append(av.Value(i))
+			} else {
+				b.Append(cv.Value(i))
+			}
+		} else {
+			b.AppendNull()
+		}
+	}
+
+	arr := b.NewArray()
+	b.Release()
+	return values.NewVectorValue(arr, semantic.BasicInt), nil // FIXME: need proper element type
+}
+
 type binaryEvaluator struct {
 	t           semantic.MonoType
 	left, right Evaluator
