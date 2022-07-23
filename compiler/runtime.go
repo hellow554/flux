@@ -428,13 +428,7 @@ func (e *conditionalVectorEvaluator) Eval(ctx context.Context, scope Scope) (val
 	}
 	defer t.Release()
 
-	// FIXME(onelson): is there a way to compare the MT more directly?
-	//  Really want to test for:
-	//  - is it non null?
-	//  - is it v[bool]?
-
 	typ := t.Type()
-
 	// Will err if typ is not Vector or Array, but that's fine.
 	// We're testing first to make sure this is a Vector.
 	etyp, _ := typ.ElemType()
@@ -447,15 +441,34 @@ func (e *conditionalVectorEvaluator) Eval(ctx context.Context, scope Scope) (val
 
 	mem := memory.GetAllocator(ctx)
 
-	tv := t.Vector().Arr().(*array.Boolean)
-	n := tv.Len()
+	tv := t.Vector()
+	// If `t` is vec repeat, skip the varied checks and immediately select the
+	// branch to return.
+	// FIXME: currently there's no way to vectorize bool literals.
+	//   This branch will never run until boolean literals work and/or we have
+	//	 const folding working with equality operators.
+	//   <https://github.com/influxdata/flux/issues/4997>
+	//   <https://github.com/influxdata/flux/issues/4608>
+	if vr, ok := tv.(*values.VectorRepeatValue); ok {
+		if vr.Value().Bool() {
+			return eval(ctx, e.consequent, scope)
+		} else {
+			return eval(ctx, e.alternate, scope)
+		}
+	}
+
+	tva := tv.Arr().(*array.Boolean)
+	n := tva.Len()
 
 	// Scan to see if we have all one outcome for the test.
-	initialOutcome := tv.IsValid(0) && tv.Value(0)
+	var initialOutcome interface{}
 	varied := false
 	for i := 0; i < n; i++ {
-		if tv.IsValid(i) {
-			if initialOutcome != tv.Value(i) {
+		if tva.IsValid(i) {
+			if initialOutcome == nil {
+				initialOutcome = tva.Value(i)
+			}
+			if initialOutcome != tva.Value(i) {
 				varied = true
 				break
 			}
@@ -463,51 +476,26 @@ func (e *conditionalVectorEvaluator) Eval(ctx context.Context, scope Scope) (val
 	}
 
 	if !varied {
-		if initialOutcome {
+		if initialOutcome.(bool) {
 			return eval(ctx, e.consequent, scope)
 		} else {
 			return eval(ctx, e.alternate, scope)
 		}
 	}
 
-	b := array.NewIntBuilder(mem) // FIXME: need to match the type of the alternate
-	b.Resize(n)
+	c, err := eval(ctx, e.consequent, scope)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Release()
 
 	a, err := eval(ctx, e.alternate, scope)
 	if err != nil {
 		return nil, err
 	}
-	c, err := eval(ctx, e.consequent, scope)
-	if err != nil {
-		return nil, err
-	}
-	// FIXME: take vec repeat into account!
-	cv := c.Vector().Arr().(*array.Int) // FIXME: need elem type
-	av := a.Vector().Arr().(*array.Int) // FIXME: need elem type
+	defer a.Release()
 
-	if cv.Len() != n || av.Len() != n {
-		return nil, errors.Newf(codes.Invalid, "vectors must be equal length") // FIXME: make message consistent with prior art
-	}
-
-	for i := 0; i < n; i++ {
-		if tv.IsValid(i) && cv.IsValid(i) && av.IsValid(i) {
-			// FIXME: is this?? Not sure when we need to append null.
-			//  The standard conditional treats a null test as a false...
-			if cv.IsNull(i) || av.IsNull(i) {
-				b.AppendNull()
-			} else if tv.IsNull(i) || !tv.Value(i) {
-				b.Append(av.Value(i))
-			} else {
-				b.Append(cv.Value(i))
-			}
-		} else {
-			b.AppendNull()
-		}
-	}
-
-	arr := b.NewArray()
-	b.Release()
-	return values.NewVectorValue(arr, semantic.BasicInt), nil // FIXME: need proper element type
+	return values.VectorConditional(tv, c.Vector(), a.Vector(), mem)
 }
 
 type binaryEvaluator struct {
